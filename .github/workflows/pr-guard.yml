@@ -1,0 +1,70 @@
+name: PR-Guard
+
+on:
+  pull_request:
+    branches: [main, dev]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Fetch base branches
+        run: |
+          git remote set-url origin "${{ github.server_url }}/${{ github.repository }}.git"
+          git fetch origin +refs/heads/*:refs/remotes/origin/*
+
+      - name: Validate PR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SRC_REF="${{ github.event.pull_request.head.ref }}"
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          echo "SRC=$SRC_REF  BASE=$BASE_REF"
+
+          # Range único do PR: commits que entrarão no merge
+          RANGE="origin/${BASE_REF}..HEAD"
+
+          fail() { echo "❌ $*"; exit 1; }
+
+          # 1) Nunca permitir merge commits na feature (histórico precisa ser linear)
+          if git rev-list --merges $RANGE | grep -q .; then
+            fail "Merge commits detectados nos commits do PR. Refaça como rebase: 
+            git fetch origin && git checkout $SRC_REF && git rebase origin/$BASE_REF && git push -f"
+          fi
+
+          if [[ "$BASE_REF" == "dev" ]]; then
+            echo "✅ PR->dev: sem merge commits."
+          elif [[ "$BASE_REF" == "main" ]]; then
+            # 2) Exigir que main seja ancestral de HEAD (garante rebase em main)
+            if ! git merge-base --is-ancestor "origin/main" "HEAD"; then
+              fail "PR->main precisa ser rebaseado em main:
+              git fetch origin && git checkout $SRC_REF && git rebase origin/main && git push -f"
+            fi
+
+            # 3) Impedir que commits exclusivos de dev entrem no PR->main
+            #    (evita 'duplicação' de PRs já feitos para dev)
+            TMP=$(mktemp)
+            git rev-list origin/main..origin/dev > "$TMP" || true
+            if [[ -s "$TMP" ]]; then
+              while read -r SHA; do
+                if git rev-list HEAD | grep -qx "$SHA"; then
+                  fail "Este PR->main contém commit que existe em dev mas não em main ($SHA). Rebase na main e remova merges de dev."
+                fi
+              done < "$TMP"
+            fi
+            echo "✅ PR->main: rebase em main e sem commits de dev."
+          else
+            echo "ℹ️ Target não é main/dev. Ignorando."
+          fi
