@@ -1,0 +1,57 @@
+name: Back-merge main→dev
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  backmerge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch
+        run: |
+          git remote set-url origin "${{ github.server_url }}/${{ github.repository }}.git"
+          git fetch origin +refs/heads/*:refs/remotes/origin/*
+
+      - name: Skip if dev already contains main
+        id: need
+        shell: bash
+        run: |
+          if git merge-base --is-ancestor origin/main origin/dev; then
+            echo "needed=false" >> $GITHUB_OUTPUT
+          else
+            echo "needed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR main→dev (if needed)
+        if: steps.need.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          title="Back-merge: main → dev"
+          body="PR automático para manter dev alinhado com produção."
+
+          # Procura PR aberto igual
+          open=$(gh pr list --base dev --head main --state open --json number --jq '.[0].number')
+          if [[ -n "${open:-}" ]]; then
+            echo "PR já aberto: #$open"
+            exit 0
+          fi
+
+          gh pr create --base dev --head main --title "$title" --body "$body"
+
+          # Tenta auto-merge por squash (dev deve permitir squash)
+          number=$(gh pr list --base dev --head main --state open --json number --jq '.[0].number')
+          if [[ -n "${number:-}" ]]; then
+            gh pr merge "$number" --squash --auto || true
+          fi
